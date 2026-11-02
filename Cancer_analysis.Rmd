@@ -1,0 +1,187 @@
+---
+title: "Cancer_analysis"
+author: "Moises A. Rojas"
+date: "2026-05-05"
+output: html_document
+---
+
+```{r setup}
+suppressMessages(library(ggplot2)) #plots
+suppressMessages(library(tidyverse)) #strings, dataframes processing
+suppressMessages(library(magrittr)) #pipes %>%
+suppressMessages(library(RColorBrewer)) #color palettes
+suppressWarnings(library(colorspace)) #colors manipulation
+suppressWarnings(library(patchwork)) #compose plots
+suppressPackageStartupMessages(library(ComplexHeatmap)) #plot heatmap
+suppressWarnings(library(ggpubr)) #stats & plots
+#suppressWarnings(library(ggbeeswarm)) #scatter plots
+suppressWarnings(library(colorRamp2)) #color mapping
+#suppressWarnings(library(FactoMineR)) #PC and clustering
+#suppressWarnings(library(factoextra)) #dimension reduction viz
+suppressMessages(library(gtexr)) #GTEx portal API
+```
+
+## Section 1: Access to gene expression data
+
+Get data from GTEx Portal.
+
+```{r section1}
+# Access to GTEx Portal -> RNA-seq data for:
+# Calcium homeostasis modulator: CALHM1,2,..6
+calhm <- get_gene_expression(gencodeIds = c("ENSG00000185933.7", "ENSG00000138172.11",
+                                            "ENSG00000183128.7", "ENSG00000164451.14",
+                                            "ENSG00000178033.6", "ENSG00000188820.13"),
+                             datasetId = "gtex_v10", itemsPerPage = 1000) #force GTEx v10
+glimpse(calhm)
+
+# Connexins: n = 22 (1 repeated)
+#('GJC3','GJA1', 'GJA10', 'GJA3', 'GJA4', 'GJA5', 'GJA8', 'GJA9', 'GJB1', 'GJB2', 'GJB3', 'GJB4', 'GJB5', 'GJB6', 'GJB7', 'GJC1', 'GJC2', 'GJC3'**rep**, 'GJD2', 'GJD3', 'GJD4', 'GJE1')
+conx <- get_gene_expression(gencodeIds = c("ENSG00000176402.6", "ENSG00000152661.9", "ENSG00000135355.4",
+                                           "ENSG00000121743.4", "ENSG00000187513.9", "ENSG00000265107.3",
+                                           "ENSG00000121634.6", "ENSG00000131233.10", "ENSG00000169562.13",
+                                           "ENSG00000165474.8", "ENSG00000188910.8", "ENSG00000189433.7",
+                                           "ENSG00000189280.3", "ENSG00000121742.19", "ENSG00000164411.12",
+                                           "ENSG00000182963.11", "ENSG00000198835.4", "ENSG00000159248.5",
+                                           "ENSG00000183153.7", "ENSG00000177291.4", "ENSG00000203733.5"),
+                            datasetId = "gtex_v10", itemsPerPage = 2000)
+glimpse(conx)
+
+# Pannexins: PANX1..3
+panx <- get_gene_expression(gencodeIds = c("ENSG00000110218.9", "ENSG00000073150.14", "ENSG00000154143.3"),
+                            datasetId = "gtex_v10", itemsPerPage = 1000)
+glimpse(panx)
+
+# Plot testing data vs tissueSiteDetailId, geneSymbol
+#tmp2 <- calhm %>% unnest(data) %>% View()
+#tmp2 %>% ggviolin(x = "tissueSiteDetailId", y = "data", color = "geneSymbol", add = "jitter",
+#                  legend = "none", size = 0.35, add.params = list(size = 1, alpha = 0.7))
+
+# Merge datasets
+genes <- bind_rows(calhm, conx, panx)
+dim(genes)
+
+# Filter to selected tissues (n = 20)
+# note that not all `tissueSiteDetailId` are in $tissues
+tissues <- c("Adipose tissue", "Bladder", "Bowel", "Brain", "Breast", "Bronchium", "Esophagus",
+             "Gallbladder", "Gastrointestinal soft tissue", "Kidney", "Liver", "Lung", "Oral cavity",
+             "Ovary", "Prostate", "Skeletal muscle", "Skin", "Synovium", "Thyroid gland", "Uterus")
+
+# Define mean TPM value per row
+genes_hm <- genes %>%
+  rowwise() %>%
+  dplyr::mutate(mean_tpm = mean(data)) %>%
+  dplyr::mutate(tissue = str_replace_all(tissueSiteDetailId, "_", " ")) %>% #remove '_' from tissues
+  select(geneSymbol, tissue, mean_tpm) %>% #drop some columns
+  pivot_wider(names_from = tissue, values_from = mean_tpm) %>% #pivot tissue to columns
+  data.frame(row.names = 1, check.names = FALSE) #set genes as row names
+
+# Normalize outliers. Use log10(TPM+1) to avoid zeroes (pseudocount)
+genes_hm_v2 <- log10(genes_hm + 1)
+
+# Review: filter those columns that are non-solid tissues
+genes_hm_v2 <- genes_hm_v2 %>%
+  select(-c("Cells EBV-transformed lymphocytes", "Cells Cultured fibroblasts"))
+
+# Calculate per gene sum and avg (row-wise)
+genes_hm_v2_export <- genes_hm_v2 %>%
+  rownames_to_column("Genes") %>% #to keep genes
+  rowwise() %>%
+  dplyr::mutate(Sum = sum(c_across(where(is.numeric)), na.rm = TRUE)) %>%
+  dplyr::mutate(Avg = mean(c_across(where(is.numeric)), na.rm = TRUE)) %>%
+  ungroup()
+
+# Export table
+#write.table(genes_hm_v2_export, "GTEx_genes_TPM_log10.tsv", sep = "\t", quote = FALSE, row.names = FALSE)
+```
+
+### Plot heatmaps
+
+Plot gene expression data across different tissues.
+
+```{r plots1, fig.width = 10, fig.height = 8, out.width = "100%"}
+# Set colors for TPM values
+tpm_colors <- colorRamp2(c(0, 1, 2, 3), c("white", "#5073ad", "#c5849d", "#793850"))
+
+# Plot full heatmap
+Heatmap(as.matrix(genes_hm_v2), border = TRUE, col = tpm_colors,
+        row_title = "Genes", column_title = "Tissues",
+        heatmap_legend_param = list(title = expression("log"[10]*"(TPM)"),
+                                    title_gp = gpar(fontsize = 12, fontface = "bold")),
+        row_names_gp = gpar(fontsize = 10), column_names_gp = gpar(fontsize = 10))
+
+# Calculate column-wise variances
+genes_hm_v2_var <- apply(genes_hm_v2, 2, var)
+
+# Keep the 50% most variable columns <-> tissues
+genes_hm_v2_idx <- order(genes_hm_v2_var, decreasing = TRUE)[1:round(0.5 * ncol(genes_hm_v2))]
+genes_hm_v2_sel <- genes_hm_v2[, genes_hm_v2_idx] #match cols
+
+# Plot filtered heatmap
+plot_hm_sel <- Heatmap(as.matrix(genes_hm_v2_sel), name = "log10(TPM+1)",
+                       row_title = "Genes", column_title = "Tissues",
+                       col = tpm_colors, border = TRUE)
+draw(plot_hm_sel, merge_legend = TRUE)
+
+# Todo: PCA, heatmap de niveles de expresion genes en los 20 tejidos
+```
+
+## Section 2: Differential gene expression
+
+Explore overexpressed genes across different tissues using transcriptomic data.
+
+```{r section2, fig.width = 10, fig.height = 8, out.width = "100%"}
+# Read pre-processed data: 1 means a gene is overexpressed
+genes_upreg <- read.csv("data/upregulated.tsv", sep = "\t", check.names = FALSE)
+colnames(genes_upreg)[1] <- "gene"
+genes_upreg <- genes_upreg %>% column_to_rownames("gene")
+
+# Set colors
+upr_colors <- colorRamp2(c(0, 1), c("white", "#385079"))
+
+# Plot heatmap
+plot_hm_upreg <- Heatmap(as.matrix(genes_upreg), border = TRUE, col = upr_colors,
+                         row_title = "Genes", column_title = "Tissues", show_heatmap_legend = FALSE,
+                         row_names_gp = gpar(fontsize = 10), column_names_gp = gpar(fontsize = 10),
+                         rect_gp = gpar(col = "white", lwd = 1))
+draw(plot_hm_upreg, merge_legend = TRUE)
+```
+
+## Section 3: log2 fold change
+
+Explore upregulated or downregulated genes using pre-processed transcriptomic data.
+
+```{r section3, fig.width = 10, fig.height = 8, out.width = "100%"}
+# Read data: >0 means a gene is upregulated
+genes_log2fc <- read.csv("data/log2foldChange.tsv", sep = "\t", check.names = FALSE)
+colnames(genes_log2fc)[1] <- "gene"
+genes_log2fc <- genes_log2fc %>% column_to_rownames("gene")
+
+# Read data with p-values
+genes_pvalue <- read.csv("data/adjusted_pvalue.tsv", sep = "\t", check.names = FALSE)
+colnames(genes_pvalue)[1] <- "gene"
+genes_pvalue <- genes_pvalue %>% column_to_rownames("gene")
+
+# Rename selected tissue
+genes_log2fc <- genes_log2fc %>% rename(Gastric = "Gastrointestinal_soft_tissue")
+genes_pvalue <- genes_pvalue %>% rename(Gastric = "Gastrointestinal_soft_tissue")
+
+# Set colors
+log2fc_colors <- colorRamp2(c(-4, -2, 0, 2, 4), c("#793850", "#c5849d", "white", "#5073ad", "#385079"))
+
+# Plot heatmap
+plot_hm_log2fc <- Heatmap(as.matrix(genes_log2fc), border = TRUE, col = log2fc_colors,
+                          row_title = "Genes", column_title = "Tissues",
+                          heatmap_legend_param = list(title = expression("log"[2]*" FC"),
+                                                      title_gp = gpar(fontsize = 12, fontface = "bold")),
+                          row_names_gp = gpar(fontsize = 10), column_names_gp = gpar(fontsize = 10),
+                          cell_fun = function(j, i, x, y, width, height, fill) {
+                            if (genes_pvalue[i, j] < 0.01) #cutoff by p-value (0.05 or 0.01)
+                              grid.text(sprintf("%.1f", genes_log2fc[i, j]), x, y, gp = gpar(fontsize = 8))
+                          })
+draw(plot_hm_log2fc, merge_legend = TRUE)
+
+# Export via code
+#png("fig3_log2_fold_change_v3_pv_0.01.png", width = 9, height = 7, units = "in", res = 300)
+#plot_hm_log2fc
+#draw(plot_hm_log2fc, merge_legend = TRUE)
+```
